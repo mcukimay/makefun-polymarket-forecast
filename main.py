@@ -116,6 +116,21 @@ def interp_quantiles(anchor_q, h):
     return list(anchor_q[hs[-1]])
 
 
+def blend_anchor(inner, outer):
+    """Blend a market's own anchor quantiles with the pooled fallback.
+
+    Returns the pooled quantiles when the market has none of its own,
+    its own when there is no pooled fallback, else the 90/10 blend.
+    """
+    if inner is None and outer is None:
+        return None
+    if inner is None:
+        return list(outer)
+    if outer is None:
+        return list(inner)
+    return [BLEND_INNER * inner[j] + (1.0 - BLEND_INNER) * outer[j] for j in range(5)]
+
+
 def forecast_market(prices, pooled, horizon):
     """240 (horizon) rows of 5 quantiles for one market."""
     if not prices:
@@ -125,15 +140,8 @@ def forecast_market(prices, pooled, horizon):
     anchor_q = {}
     for h in ANCHORS:
         inner, outer = anchor_quantiles(prices, h)
-        if inner is None and outer is None:
-            aq = pooled[h]
-        elif inner is None:
-            aq = list(outer)
-        elif outer is None:
-            aq = list(inner)
-        else:
-            aq = [BLEND_INNER * inner[j] + (1.0 - BLEND_INNER) * outer[j] for j in range(5)]
-        anchor_q[h] = aq
+        aq = blend_anchor(inner, outer)
+        anchor_q[h] = aq if aq is not None else pooled[h]
     rows = []
     for h in range(1, horizon + 1):
         qs = interp_quantiles(anchor_q, h)
