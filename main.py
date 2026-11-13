@@ -13,13 +13,24 @@ Approach: per-market empirical quantiles of h-step price displacements.
   - Two windows blended 90/10: the last 6h (adaptive to the current regime) and the
     last 24h (tail stability). A market with too few displacement samples at an
     anchor falls back to the pooled (cross-market, per-market-centred) quantiles.
+  - Displacements are sampled every minute (STEP = 1): overlapping samples are
+    correlated, but the denser tail sampling beats stride 5 on practice.
+  - Recent-activity scaling: the spread is multiplied by a per-market factor from
+    the last 30 minutes' realised 1-min volatility relative to the 6h window,
+    clipped to [0.7, 1.6]. A market that just moved gets wider intervals, a quiet
+    one narrower ones. The factor is the same for every horizon (a horizon-faded
+    version scored worse).
 
 Measured on the 6 practice cases against the real post-checkpoint prices from
 Polymarket's public API (mean pinball loss, percentage points):
-  house baseline 0.363589 | this entry 0.285642 (21% better; beats baseline on
-  all 6 practice cases and on both halves p00-p02 / p03-p05).
-  Median absolute error 0.767503 (same as baseline: median is the last price).
-  90% interval coverage 0.8521 (baseline 0.9496).
+  house baseline 0.363589 | v1 entry 0.285642 | this entry 0.276209 (24% better
+  than baseline, 3.3% better than v1; beats the baseline on all 6 practice cases
+  and on both halves p00-p02 / p03-p05).
+  Per case: p00 0.4486, p01 0.3129, p02 0.3899, p03 0.2734, p04 0.1939,
+  p05 0.1057. Median absolute error 0.767503 (same as baseline: median is the
+  last price). 90% interval coverage 0.8306 (baseline 0.9496; the misses are
+  skewed high: 3.9% below q05, 10.8% above q95 — one-sided tail widening was
+  tried and did not help).
 
 Stdlib only, no network, deterministic. Reads $MAKEFUN_INPUT_DIR (else /input/),
 writes $MAKEFUN_OUTPUT_DIR (else /output/), one <id>.out per <id>.in.
@@ -33,8 +44,11 @@ ANCHORS = [1, 5, 15, 60, 240]
 WIN_INNER = 360    # minutes of recent history for the adaptive window (6h)
 WIN_OUTER = 1440   # minutes of recent history for the stability window (24h)
 BLEND_INNER = 0.9  # weight of the inner window's quantiles
-STEP = 5           # stride (minutes) when sampling displacements
+STEP = 1           # stride (minutes) when sampling displacements
 MIN_SAMPLES = 25   # below this, a market uses the pooled quantiles at that anchor
+VOL_RECENT = 30    # minutes of recent history for the activity scale
+VOL_LO = 0.7       # activity scale is clipped to [VOL_LO, VOL_HI]
+VOL_HI = 1.6
 
 
 def price6(x):
@@ -131,8 +145,39 @@ def blend_anchor(inner, outer):
     return [BLEND_INNER * inner[j] + (1.0 - BLEND_INNER) * outer[j] for j in range(5)]
 
 
+def activity_scale(prices):
+    """Spread multiplier from the last VOL_RECENT minutes' realised 1-min
+    volatility relative to the WIN_INNER window, clipped to [VOL_LO, VOL_HI].
+
+    A market that just moved gets wider intervals; a quiet one gets narrower
+    ones. Returns VOL_LO when the window shows no movement at all (or the
+    history is too short to measure), 1.0 when there is nothing to compare.
+    """
+    def sd1(window):
+        p = prices[-window - 1:] if window < len(prices) else prices
+        if len(p) < 3:
+            return 0.0
+        ds = [p[i + 1] - p[i] for i in range(len(p) - 1)]
+        mu = sum(ds) / len(ds)
+        return math.sqrt(sum((d - mu) ** 2 for d in ds) / len(ds))
+    recent = sd1(VOL_RECENT)
+    window = sd1(WIN_INNER)
+    if window <= 0.0:
+        return VOL_LO
+    if recent <= 0.0:
+        return VOL_LO
+    return min(VOL_HI, max(VOL_LO, math.sqrt(recent / window)))
+
+
 def forecast_market(prices, pooled, horizon):
-    """240 (horizon) rows of 5 quantiles for one market."""
+    """240 (horizon) rows of 5 quantiles for one market.
+
+    The activity scale is applied to the offsets of the already-clamped row
+    (not to the raw quantile offsets): for a low-priced market the raw lower
+    tail often runs far below 0, and scaling the clamped offset floors q05 at
+    x * (1 - scale) instead of letting it collapse to 0. On practice this
+    ordering scores better than scaling the raw offsets.
+    """
     if not prices:
         x = 0.5
     else:
@@ -142,6 +187,7 @@ def forecast_market(prices, pooled, horizon):
         inner, outer = anchor_quantiles(prices, h)
         aq = blend_anchor(inner, outer)
         anchor_q[h] = aq if aq is not None else pooled[h]
+    scale = activity_scale(prices)
     rows = []
     for h in range(1, horizon + 1):
         qs = interp_quantiles(anchor_q, h)
@@ -149,7 +195,13 @@ def forecast_market(prices, pooled, horizon):
         for j in range(1, 5):
             if row[j] < row[j - 1]:
                 row[j] = row[j - 1]
-        rows.append(row)
+        med = row[2]
+        row = [med + (row[0] - med) * scale, med + (row[1] - med) * scale,
+               med, med + (row[3] - med) * scale, med + (row[4] - med) * scale]
+        for j in range(1, 5):
+            if row[j] < row[j - 1]:
+                row[j] = row[j - 1]
+        rows.append([price6(v) for v in row])
     return rows
 
 

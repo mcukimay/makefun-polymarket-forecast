@@ -37,6 +37,7 @@ so the truth construction is correct.
 | empirical centred quantiles 12h | 0.313306 | 0.8434 |
 | blend 12h/24h 70/30 + pooled fallback | 0.313789 | 0.9120 |
 | **final: blend 6h/24h 90/10 + pooled fallback** | **0.285642** | **0.8521** |
+| v2: STEP 1 + recent-activity scale (30m, clip [0.7, 1.6]) | **0.276209** | **0.8306** |
 
 Per-case final vs baseline: p00 0.471/0.536, p01 0.315/0.380, p02 0.399/0.408,
 p03 0.289/0.369, p04 0.195/0.299, p05 0.114/0.238. Split-half: p00-p02
